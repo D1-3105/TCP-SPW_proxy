@@ -12,6 +12,7 @@
 
 #include "SpW_Eth_utils.h"
 #include "logging.h"
+#include "TCPReceiverSyncSPW.h"
 
 std::string utils::get_my_mac(const char* interfaceName) {
     struct ifaddrs* ifAddrStruct = nullptr;
@@ -42,7 +43,7 @@ std::string utils::get_my_mac(const char* interfaceName) {
 }
 
 int SpW_conf::send_conf_packet(spw_eth_conf_header_2 str, unsigned int rawsock) {
-    int result, i;
+    int result;
     result = SpW_Eth_Send_Conf_Packet(rawsock, str);
     if (result < 0) {
         throw std::runtime_error("SpW_Eth_Send_Conf_Packet - failed!");
@@ -91,61 +92,85 @@ spw_eth_conf_header_2* SpW_conf::create_conf_producer_packet(const char* device)
 }
 
 
-void SpW_send::send_data_loopback(const int &socket, unsigned char *buf, const int &buf_size, const bool& is_error) {
+void SpW_send::send_data_loopback(TCPReceiverSyncSPW& syncer, const int &socket, unsigned char *buf, const int &buf_size, const bool& is_error) {
     int packet_end;
 
     // Calculate the number of packets
-    size_t total_packets = ceil(double(buf_size + sizeof(int)) / 1500);
+    size_t first_packet_size = 1500 - 2 * sizeof(int);
+    size_t subsequent_packet_size = 1500 - sizeof(int);
+    size_t total_packets = 1 + std::ceil(double(buf_size - first_packet_size) / subsequent_packet_size);
+
+    BOOST_LOG_TRIVIAL(debug) << "total_packets=" << total_packets;
     size_t transported_bytes = 0;
 
     // Create buffer to hold packet size and data
     unsigned char temp_buf[1500]; // Maximum size of one packet, stack-allocated to avoid heap allocation issues
 
-    for (size_t packet_num = 0; packet_num < total_packets; ++packet_num) {
+    for (size_t packet_num = 0; packet_num < total_packets;) {
         int current_packet_size;
 
         // If this is the first packet, add the total message size at the beginning
         if (packet_num == 0) {
-            current_packet_size = std::min<int>(1500 - sizeof(int), buf_size - transported_bytes);
-            *(int*)temp_buf = buf_size; // Write the total message size at the beginning of the first packet
-            memcpy(temp_buf + sizeof(int), buf + transported_bytes, current_packet_size);
-            current_packet_size += sizeof(int); // Adjust the packet size by the size of the written length information
+            current_packet_size = std::min<int>(1500 - 2 * sizeof(int), buf_size - transported_bytes);
+            *(int*)temp_buf = packet_num; // Write the packet number at the beginning
+            *(int*)(temp_buf + sizeof(int)) = buf_size; // Write the total message size after the packet number
+            std::memcpy(temp_buf + 2 * sizeof(int), buf + transported_bytes, current_packet_size);
+            current_packet_size += 2 * sizeof(int); // Adjust the packet size by the size of the written length information and packet number
         } else {
             // For subsequent packets, just copy the data
-            current_packet_size = std::min<int>(1500, buf_size - transported_bytes);
-            memcpy(temp_buf, buf + transported_bytes, current_packet_size);
+            current_packet_size = std::min<int>(1500 - sizeof(int), buf_size - transported_bytes);
+            *(int*)temp_buf = packet_num; // Write the packet number at the beginning
+            std::memcpy(temp_buf + sizeof(int), buf + transported_bytes, current_packet_size);
+            current_packet_size += sizeof(int); // Adjust the packet size by the size of the written packet number
         }
 
         // Determine the type of packet
         packet_end = SpW_Eth_EOF;
+
         // Send the packet
         int res = SpW_Send_Packet(socket, temp_buf, current_packet_size, packet_end);
-        transported_bytes += current_packet_size - ((packet_num == 0) ? sizeof(int) : 0);
+        if (res < 0) {
+            std::cerr << "Failed to send packet: " << strerror(errno) << std::endl;
+            return;
+        }
+
+        auto timeout = std::chrono::milliseconds(100);
+        std::unique_lock<std::mutex> lock(syncer.mu_subseq_);
+        auto status = syncer.cv_subseq_.wait_for(lock, timeout);
+        if (status != std::cv_status::timeout) {
+            transported_bytes += current_packet_size - ((packet_num == 0) ? 2 * sizeof(int) : sizeof(int));
+            ++packet_num;
+        } else {
+            continue;
+        }
     }
 }
 
 
-void SpW_send::send_data_loopback_debug(const int &socket, unsigned char *buf, const int &buf_size, const bool& is_error) {
+void SpW_send::send_data_loopback_debug(TCPReceiverSyncSPW& syncer, const int &socket, unsigned char *buf, const int &buf_size, const bool& is_error) {
     // Calculate the number of packets
-    size_t total_packets = ceil(double(buf_size + sizeof(int)) / 1500);
+    size_t total_packets = std::ceil(double(buf_size + 2 * sizeof(int)) / 1500);
     size_t transported_bytes = 0;
 
     // Create buffer to hold packet size and data
     unsigned char temp_buf[1500]; // Maximum size of one packet, stack-allocated to avoid heap allocation issues
 
-    for (size_t packet_num = 0; packet_num < total_packets; ++packet_num) {
+    for (size_t packet_num = 0; packet_num < total_packets;) {
         int current_packet_size;
 
         // If this is the first packet, add the total message size at the beginning
         if (packet_num == 0) {
-            current_packet_size = std::min<int>(1500 - sizeof(int), buf_size - transported_bytes);
-            *(int*)temp_buf = buf_size; // Write the total message size at the beginning of the first packet
-            memcpy(temp_buf + sizeof(int), buf + transported_bytes, current_packet_size);
-            current_packet_size += sizeof(int); // Adjust the packet size by the size of the written length information
+            current_packet_size = std::min<int>(1500 - 2 * sizeof(int), buf_size - transported_bytes);
+            *(int*)temp_buf = packet_num; // Write the packet number at the beginning
+            *(int*)(temp_buf + sizeof(int)) = buf_size; // Write the total message size after the packet number
+            std::memcpy(temp_buf + 2 * sizeof(int), buf + transported_bytes, current_packet_size);
+            current_packet_size += 2 * sizeof(int); // Adjust the packet size by the size of the written length information and packet number
         } else {
             // For subsequent packets, just copy the data
-            current_packet_size = std::min<int>(1500, buf_size - transported_bytes);
-            memcpy(temp_buf, buf + transported_bytes, current_packet_size);
+            current_packet_size = std::min<int>(1500 - sizeof(int), buf_size - transported_bytes);
+            *(int*)temp_buf = packet_num; // Write the packet number at the beginning
+            std::memcpy(temp_buf + sizeof(int), buf + transported_bytes, current_packet_size);
+            current_packet_size += sizeof(int); // Adjust the packet size by the size of the written packet number
         }
 
         // Send the packet
@@ -154,7 +179,18 @@ void SpW_send::send_data_loopback_debug(const int &socket, unsigned char *buf, c
             std::cerr << "Failed to send packet: " << strerror(errno) << std::endl;
             return;
         }
-        transported_bytes += current_packet_size - ((packet_num == 0) ? sizeof(int) : 0);
+
+        // Use the mtx from syncer to lock and wait
+        auto timeout = std::chrono::milliseconds(100);
+        std::unique_lock<std::mutex> lock(syncer.mu_subseq_);
+        auto status = syncer.cv_subseq_.wait_for(lock, timeout);
+
+        if (status != std::cv_status::timeout) {
+            transported_bytes += current_packet_size - ((packet_num == 0) ? 2 * sizeof(int) : sizeof(int));
+            ++packet_num;
+        } else {
+            continue;
+        }
     }
 }
 
@@ -306,7 +342,7 @@ int SpW_connect::connect(char* device) {
 
 
 int SpW_recv::recv(int s, unsigned char* buf, int buf_size, unsigned char* mac, unsigned char *end_packet) {
-    return SpW_Recv_Packet(s, buf, buf_size, mac, end_packet);
+    return SpW_Recv_Packet_From_MAC(s, buf, buf_size, mac, end_packet);
 }
 
 

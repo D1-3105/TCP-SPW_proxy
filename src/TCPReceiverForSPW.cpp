@@ -18,7 +18,8 @@ void TCPReceiverForSPW::HandleMessage(const boost::system::error_code &ec, std::
         BOOST_LOG_TRIVIAL(info) << "Sending spw loopback message: " << bytes_transferred;
         long long before_recv = sync_spw_->acks_;
 
-        SpW_send::send_data_loopback_debug(
+        SpW_send::send_data_loopback(
+                *sync_spw_,
                 spw_socket_,
                 (unsigned char *) buf,
                 (const int) buffer_.size(),
@@ -37,12 +38,12 @@ TCPReceiverForSPW::TCPReceiverForSPW(boost::asio::io_context& io_context, short 
 :
 TCPReceiver(io_context, port) {
     char* spw_device = const_cast<char*>(default_spw_device.c_str());
-    spw_socket_ = SpW_connect::connect_debug_sender(spw_device);
+    spw_socket_ = SpW_connect::connect(spw_device);
     if (spw_socket_ < 0) {
         throw std::runtime_error("SpW bridge socket initialization error");
     }
     spw_eth_conf_header_2* conf_header = SpW_conf::create_conf_producer_packet(spw_device);
-    auto res = SpW_conf::send_conf_packet_debug(*conf_header, spw_socket_);
+    auto res = SpW_conf::send_conf_packet(*conf_header, spw_socket_);
     BOOST_LOG_TRIVIAL(info) << "Result conf packet send is: " << res;
 
 
@@ -55,7 +56,7 @@ TCPReceiver(io_context, port) {
 
 TCPReceiverForSPW::~TCPReceiverForSPW() {
     if (spw_socket_ > 0) {
-        SpW_close::close_debug(spw_socket_);
+        SpW_close::close(spw_socket_);
     }
     sync_ctx_->stop();
     delete[] sync_ctx_;

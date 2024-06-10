@@ -17,6 +17,7 @@ public:
     [[noreturn]] void run();
 protected:
     virtual void HandleReceive(std::vector<unsigned char>& message);
+    void SendPAck();
 private:
     std::string device_;
 

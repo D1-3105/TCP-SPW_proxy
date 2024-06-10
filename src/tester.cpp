@@ -5,13 +5,16 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/select.h>
+#include "chrono"
+
+std::chrono::high_resolution_clock::time_point send_time;
 
 void* send_message(void* arg) {
     std::string host = "127.0.0.1";
     short port = 6300;
     std::string message;
 
-    for (int  i = 0; i < 300000; i++)
+    for (int i = 0; i < 2764828; i++)
         message += "1";
 
     while (true) {
@@ -58,6 +61,8 @@ void* send_message(void* arg) {
             std::vector<char> buffer(sizeof(size_t) + message_size);
             std::memcpy(buffer.data(), &message_size, sizeof(size_t)); // Copy the size of the message
             std::memcpy(buffer.data() + sizeof(size_t), message.data(), message_size); // Copy the message data
+
+            send_time = std::chrono::high_resolution_clock::now(); // Mark send time
 
             if (send(sockfd, buffer.data(), buffer.size(), 0) < 0) {
                 perror("send");
@@ -111,7 +116,7 @@ void* receive_message(void* arg) {
         while (true) {
             size_t message_size;
             ssize_t recv_size = recv(client_sockfd, &message_size, sizeof(size_t), 0);
-            if (recv_size <= 0 or message_size > 10000000) {
+            if (recv_size <= 0 || message_size > 10000000) {
                 continue;
             }
 
@@ -121,14 +126,21 @@ void* receive_message(void* arg) {
                 continue;
             }
 
+            auto receive_time = std::chrono::high_resolution_clock::now(); // Mark receive time
+            std::chrono::duration<double> elapsed = receive_time - send_time;
+
             std::string received_message(buffer.begin(), buffer.end());
             std::cout << "Received message of size " << message_size << std::endl;
+            std::cout << "Time between send and receive: " << elapsed.count() << " seconds" << std::endl;
         }
+
+        close(client_sockfd);
     }
 
     close(sockfd);
     return nullptr;
 }
+
 
 int main() {
     pthread_t sender_thread, receiver_thread;

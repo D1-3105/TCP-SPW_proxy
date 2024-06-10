@@ -13,7 +13,10 @@ class TCPReceiverSyncSPW: public TCPReceiver {
 public:
     explicit TCPReceiverSyncSPW(boost::asio::io_context& context, short port, std::condition_variable& cv);
     long long acks_;
+    std::condition_variable cv_subseq_;
+    std::mutex mu_subseq_;
 private:
+    std::vector<char> buffer_;
     std::mutex mu_;
     std::condition_variable* cv_;
 protected:
